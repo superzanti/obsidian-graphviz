@@ -1,56 +1,82 @@
-import { Plugin } from 'obsidian';
+import { Plugin, MarkdownPostProcessorContext } from 'obsidian';
 import { DEFAULT_SETTINGS, GraphvizSettings, GraphvizSettingsTab } from './setting';
 import { Processors } from './processors';
 import { Suggesters } from './suggesters';
 
-// Remember to rename these classes and interfaces!
-
-
 export default class GraphvizPlugin extends Plugin {
-  settings: GraphvizSettings;
+    settings: GraphvizSettings;
 
-  async onload() {
-    console.debug('Load graphviz plugin');
-    await this.loadSettings();
-    this.addSettingTab(new GraphvizSettingsTab(this));
-    const processors = new Processors(this);
-    const suggesters = new Suggesters(this);
-    const d3Sources = ['https://d3js.org/d3.v5.min.js',
-      'https://unpkg.com/@hpcc-js/wasm@0.3.11/dist/index.min.js',
-      'https://unpkg.com/d3-graphviz@3.0.5/build/d3-graphviz.js'];
+    registeredProcessors: (() => void)[] = [];
 
+    async onload() {
+        console.debug('Load graphviz plugin');
+        await this.loadSettings();
+        this.addSettingTab(new GraphvizSettingsTab(this));
 
-    this.app.workspace.onLayoutReady(() => {
-      switch (this.settings.renderer) {
-        case 'd3_graphviz':
-          for (const src of d3Sources) {
-            const script = document.createElement('script');
-            script.src = src;
-            (document.head || document.documentElement).appendChild(script);
-          }
-          this.registerMarkdownCodeBlockProcessor('dot', processors.d3graphvizProcessor.bind(processors));
-          break;
-        default:
-          this.registerMarkdownCodeBlockProcessor('dot', processors.imageProcessor.bind(processors));
-      }
+        const d3Sources = [
+            'https://d3js.org/d3.v5.min.js',
+            'https://unpkg.com/@hpcc-js/wasm@0.3.11/dist/index.min.js',
+            'https://unpkg.com/d3-graphviz@3.0.5/build/d3-graphviz.js',
+        ];
 
-      this.registerEditorSuggest(new Suggesters(this.app, this));
-    });
-  }
+        this.app.workspace.onLayoutReady(() => {
+            for (const src of d3Sources) {
+                const script = document.createElement('script');
+                script.src = src;
+                (document.head || document.documentElement).appendChild(script);
+            }
 
+            this.reloadProcessors();
 
+            this.registerEditorSuggest(new Suggesters(this.app, this));
+        });
+    }
 
-  onunload() {
-    console.debug('Unload graphviz plugin');
-  }
+    reloadProcessors() {
+        // unregister old processors
+        this.registeredProcessors.forEach((unreg) => unreg());
+        this.registeredProcessors = [];
 
-  async loadSettings(): Promise<void> {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
-    return Promise.resolve();
-  }
+        const processors = new Processors(this);
+        const targetLang = this.settings.codeblockLanguage;
 
+        // Wrap the processor to check both lang and label
+        const wrappedProcessor = async (source: string, el: HTMLElement, ctx: MarkdownPostProcessorContext) => {
+            const section = ctx.getSectionInfo(el);
+            if (!section) return;
 
-  async saveSettings() {
-    await this.saveData(this.settings);
-  }
+            const firstLine = section.text.split('\n')[section.lineStart];
+            const match = firstLine.match(/^```(?<lang>[^\s^{]+)?\s*(?:{(?<label>[^}]+)})?/);
+
+            if (!match) return;
+
+            const lang = match.groups?.lang ?? '';
+            const label = match.groups?.label ?? '';
+
+            if (lang === targetLang || label === targetLang) {
+                if (this.settings.renderer === 'd3_graphviz') {
+                    await processors.d3graphvizProcessor(source, el, ctx);
+                } else {
+                    await processors.imageProcessor(source, el, ctx);
+                }
+            }
+        };
+
+        // Register a "catch-all" codeblock processor
+        const unreg = this.registerMarkdownCodeBlockProcessor(targetLang, wrappedProcessor);
+        this.registeredProcessors.push(unreg);
+    }
+
+    onunload() {
+        console.debug('Unload graphviz plugin');
+    }
+
+    async loadSettings(): Promise<void> {
+        this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+        return Promise.resolve();
+    }
+
+    async saveSettings() {
+        await this.saveData(this.settings);
+    }
 }
